@@ -1,0 +1,201 @@
+#!/usr/bin/perl
+#
+# Demo for flexible Perl script configuration framework.
+# Uses Config::Std for parsing config files and Getopt::Long for parsing command line options.
+# Values configured in config file can be overridden from the command line (see examples and sample config file).
+#
+# 2013-04-24 Martin Bartosch
+#
+
+use strict;
+use warnings;
+use English;
+
+use Config::Std;
+use Getopt::Long;
+use Data::Dumper;
+
+my %params;
+
+# get command line options
+GetOptions(\%params,
+	   'help|?',
+	   'man',
+	   'verbose',
+	   'foo=s',
+	   'config=s',
+	   # if the config options set by --mykey is multi-valued, use s@ instead
+	   'mykey1=s@',
+	   'mykey2=s@',
+    ) or pod2usage(-verbose => 0);
+
+pod2usage(-exitstatus => 0, -verbose => 2) if $params{man};
+pod2usage(-verbose => 1) if ($params{help});
+
+if (! defined $params{config}) {
+    die "No --config file specified. Stopped";
+}
+
+# $config must be global if you wish to access it from inside an anonymous function
+our $config;
+if (! read_config($params{config}, $config)) {
+    die "Could not read config file $params{config}. Stopped";
+}
+
+# certain configuration entries might have to be forced into an array
+# mark all entries which you want to coerce into an array
+# CHANGE THIS ACCORDING TO YOUR NEEDS
+my %coerce_config_array = (
+    multivaluetest => {
+	mykey1 => 1,
+	mykey2 => 1,
+    },
+    niftysection => {
+        dummy5 => 1,
+    },
+);
+
+# array coercion (only if required for entry), according to settings in %coerce_config_array
+foreach my $section (keys %coerce_config_array) {
+    foreach my $key (keys %{$coerce_config_array{$section}}) {
+	if ($coerce_config_array{$section}->{$key}) {
+	    if (ref $config->{$section}->{$key} eq '') {
+		$config->{$section}->{$key} = [ $config->{$section}->{$key} ];
+	    }
+	}
+    }
+}
+
+# overwrite configuration from command line
+# CHANGE THIS ACCORDING TO YOUR NEEDS
+my %overwrite_config_from_command_line = (
+    # specify which command line options should overwrite which config entries
+    # format:
+    # command line option => [ config_section, config_entry ]
+
+    # command line options for section multivaluetest
+    mykey1 => [ 'multivaluetest', 'mykey1' ],
+    mykey2 => [ 'multivaluetest', 'mykey2' ],
+
+    # top level entry example
+    foo    => [ '', 'foo' ],
+    );
+
+foreach my $option (keys %overwrite_config_from_command_line) {
+    if (defined $params{$option}) {
+	print "command line option $option was given\n";
+	my ($section, $key) = @{$overwrite_config_from_command_line{$option}};
+	if (ref $config->{$section}->{$key} eq '') {
+	    # scalar value replacement
+	    $config->{$section}->{$key} = $params{$option};
+	} else {
+	    # config entry is an array
+	    $config->{$section}->{$key} = $params{$option};
+	}
+    }
+}
+
+# optional: evaluate anonymous functions
+foreach my $section (keys %{$config}) {
+    foreach my $key (keys %{$config->{$section}}) {
+	my $entry = $config->{$section}->{$key};
+
+	if (ref $entry eq '') {
+	    # scalar value in config option
+	    if ($entry =~ m{ \A sub \s* \{ }xms) {
+		# found a code ref
+		my $result = eval $entry;
+		if ($EVAL_ERROR) {
+		    die "Evaluation error in anonymous subroutine configured for $section:$key: " . $EVAL_ERROR;
+		}
+		if (ref $result eq 'CODE') {
+		    $result = &{$result};
+		}
+		if (ref $result ne '') {
+		    die "Evaluation error in anonymous subroutine configured for $section:$key: Result was not a scalar";
+		}
+		# overwrite config entry witgh computed result
+		$config->{$section}->{$key} = $result;
+	    }
+	} else {
+	    # array values in config option
+	    my $values = [];
+	    foreach my $item (@{$entry}) {
+		if ($item =~ m{ \A sub \s* \{ }xms) {
+		    # found a code ref
+		    my $result = eval $item;
+		    if ($EVAL_ERROR) {
+			die "Evaluation error in anonymous subroutine configured for $section:$key: " . $EVAL_ERROR;
+		    }
+		    if (ref $result eq 'CODE') {
+			$result = &{$result};
+		    }
+		    if (ref $result eq '') {
+			push @{$values}, $result;
+		    } elsif (ref $result eq 'ARRAY') {
+			push @{$values}, @{$result};
+		    } else {
+			die "Evaluation error in anonymous subroutine configured for $section:$key: Result was not a scalar nor an array";
+		    }
+		} else {
+		    push @{$values}, $item;
+		}
+	    }
+	    $config->{$section}->{$key} = $values;
+	}
+    }
+}
+
+print Dumper $config;
+
+__END__
+
+=head1 NAME
+
+config-std-demo - Configuration demo
+
+=head1 USAGE
+
+config-std-demo [options] ARGS
+
+ Options:
+   --help                brief help message
+   --man                 full documentation
+
+
+=head1 DESCRIPTION
+
+B<config-std-demo> is a nice demo how Config::Std and Getopt::Long can
+be used to configure a Perl script.
+
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--help>
+
+Display a short help summary.
+
+=item B<--man>
+
+Display full manual page.
+
+=back
+
+=head1 ARGUMENTS
+
+This script does not process any arguments.
+
+=head1 EXAMPLES
+
+  ./config-std-demo
+
+  ./config-std-demo --help
+
+  ./config-std-demo --man
+
+  ./config-demo  --config demo.conf  --foo blurb
+
+  ./config-demo  --config demo.conf  --mykey1 foo --mykey1 bar
+
